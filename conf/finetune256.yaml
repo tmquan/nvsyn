@@ -1,0 +1,113 @@
+hydra:
+  output_subdir: null
+  run:
+    dir: .
+
+defaults:
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+data:
+  datadir: "data"
+  train_samples: 2000
+  val_samples: 400
+  test_samples: null
+  train_image3d_folders:
+    - "data/ChestXRLungSegmentation/NSCLC/processed/train/images/"
+    - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-0/"
+    - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-1/"
+    - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-2/"
+    - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-3/"
+    - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4/"
+    - "data/ChestXRLungSegmentation/MELA2022/raw/train/images/"
+    - "data/ChestXRLungSegmentation/MELA2022/raw/val/images/"
+    - "data/ChestXRLungSegmentation/AMOS2022/raw/train/images/"
+    - "data/ChestXRLungSegmentation/AMOS2022/raw/val/images/"
+    - "data/ChestXRLungSegmentation/MAISI/images/"
+    # - "data/ChestXRLungSegmentation/TCIA/images/"
+  train_label3d_folders: []
+  train_image2d_folders:
+    - "data/ChestXRLungSegmentation/VinDr/v1/processed/train/images/"
+  train_label2d_folders: []
+  val_image3d_folders:
+    - "data/ChestXRLungSegmentation/TCIA/images/"
+  val_label3d_folders: []
+  val_image2d_folders:
+    - "data/ChestXRLungSegmentation/VinDr/v1/processed/test/images/"
+  val_label2d_folders: []
+  test_image3d_folders:
+    - "data/ChestXRLungSegmentation/TCIA/images/"
+  test_label3d_folders: []
+  test_image2d_folders:
+    - "data/ChestXRLungSegmentation/VinDr/v1/processed/test/images/"
+  test_label2d_folders: []
+  img_shape: 256
+  vol_shape: 256
+  batch_size: 1
+
+model:  
+  phase: "diffusion"
+  timesteps: 1000
+  prediction_type: "sample" # "sample" or "epsilon" or "v_prediction"
+  img_shape: ${data.img_shape}
+  vol_shape: ${data.vol_shape}
+  batch_size: ${data.batch_size}
+  n_pts_per_ray: 800
+  fov_depth: 256
+  min_depth: 7.0
+  max_depth: 9.0
+  ndc_extent: 1.0
+  fov: 12.0
+
+train:
+  ckpt: ${resume_from_checkpoint}
+  strict: 1 if ${resume_from_checkpoint} is not None else 0
+  lr: 4e-5
+  alpha: 1
+  gamma: 10
+  perceptual: false
+  lamda: 0.1
+  batch_size: ${data.batch_size}
+  epochs: 300
+  ema_decay: 0.9999 # `-1` disables it
+
+test: null
+# test:
+#   ckpt: ${resume_from_checkpoint}
+#   strict: 1 if ${resume_from_checkpoint} is not None else 0
+
+# resume_from_checkpoint: null
+resume_from_checkpoint: logs_2d/diffusion/version_0/checkpoints/epoch=233-validation_loss_epoch=1.87.ckpt
+
+trainer:
+  accelerator: auto
+  devices: -1
+  precision: '16-mixed'
+  strategy: "ddp_find_unused_parameters_true"
+  max_epochs: ${train.epochs}
+  enable_model_summary: true
+  # amp_backend: apex
+
+callbacks:
+  - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    monitor: "validation_loss_epoch"
+    mode: "min"
+    auto_insert_metric_name: true
+    save_top_k: 2
+    save_last: true
+    filename: "{epoch}-{validation_loss_epoch:.2f}"
+    # every_n_epochs: 20
+  - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+    logging_interval: 'epoch'
+    log_momentum: true
+    log_weight_decay: true
+  - _target_: lightning.pytorch.callbacks.RichProgressBar
+    refresh_rate: 1
+  - _target_: lightning.pytorch.callbacks.StochasticWeightAveraging
+    swa_lrs: 1e-3  
+
+logger:
+  - _target_: lightning.pytorch.loggers.TensorBoardLogger
+    save_dir: "./logs"
+    log_graph: true
+    name: ${model.phase}
