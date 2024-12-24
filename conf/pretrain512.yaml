@@ -41,9 +41,9 @@ data:
   test_image2d_folders:
     - "data/ChestXRLungSegmentation/VinDr/v1/processed/test/images/"
   test_label2d_folders: []
-  img_shape: 256
-  vol_shape: 256
-  batch_size: 2
+  img_shape: 512
+  vol_shape: 512
+  batch_size: 1
 
 model:  
   phase: "diffusion"
@@ -62,7 +62,7 @@ model:
 train:
   ckpt: ${resume_from_checkpoint}
   strict: 1 if ${resume_from_checkpoint} is not None else 0
-  lr: 5e-5
+  lr: 4e-5
   alpha: 1
   gamma: 10
   perceptual: false
@@ -82,7 +82,7 @@ resume_from_checkpoint: null
 trainer:
   accelerator: auto
   devices: -1
-  precision: '16-mixed'
+  precision: 32 #'16-mixed'
   strategy: "ddp_find_unused_parameters_true"
   max_epochs: ${train.epochs}
   enable_model_summary: true
