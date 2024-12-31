@@ -89,7 +89,9 @@ class SynLightningModule(LightningModule):
             feature_size=48,
             use_checkpoint=True,
         )
-        
+        for param in self.unet3d_model.parameters():
+            param.zero_()
+
         # self.perc25d_loss = None
         self.perc25d_loss = PerceptualLoss(
             spatial_dims=3, 
@@ -271,8 +273,8 @@ class SynLightningModule(LightningModule):
         im3d_loss_inv = F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.gamma \
 
         im2d_loss_inv = F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
-                      + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \          
-        
+                      + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
+                      
         loss = im2d_loss_inv + im3d_loss_inv  
         
         if self.perc25d_loss is not None:
