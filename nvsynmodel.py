@@ -87,7 +87,16 @@ class SynLightningModule(LightningModule):
             in_channels=1,
             out_channels=model_cfg.fov_depth,
             feature_size=48,
-            # use_checkpoint=True,
+            depths=(2, 2, 2, 2),
+            num_heads=(3, 6, 12, 24),
+            norm_name="instance",
+            drop_rate=0.5,
+            attn_drop_rate=0.5,
+            dropout_path_rate=0.5,
+            normalize=True,
+            use_checkpoint=False,
+            downsample="mergingv2",
+            use_v2=True,
         )
         self.unet3d_model = None
         # self.unet3d_model = SwinUNETR(
