@@ -81,40 +81,64 @@ class SynLightningModule(LightningModule):
             ndc_extent=model_cfg.ndc_extent,
         )
 
-        self.unet2d_model = SwinUNETR(
+        self.unet2d_model = DiffusionModelUNet(
             spatial_dims=2,
-            img_size=self.model_cfg.img_shape, 
             in_channels=1,
             out_channels=model_cfg.fov_depth,
-            feature_size=48,
-            # use_checkpoint=True,
-        )
-        self.unet3d_model = None
-        # self.unet3d_model = SwinUNETR(
+            channels=[128, 128, 256],
+            attention_levels=[False, False, True],
+            num_head_channels=[0, 0, 256],
+            num_res_blocks=2,
+            with_conditioning=True, 
+            cross_attention_dim=4, # Condition with dist, elev, azim, fov;  straight/hidden view  # flatR | flatT
+            # upcast_attention=True,
+            # use_flash_attention=True,
+            # use_combined_linear=True,
+            # dropout_cattn=0.5
+        ) #.eval()
+        # init_weights(self.unet2d_model, init_type='normal', init_gain=0.02)
+        
+        # self.unet3d_model = None 
+        # self.unet3d_model = DiffusionModelUNet(
         #     spatial_dims=3,
-        #     img_size=self.model_cfg.vol_shape,
         #     in_channels=1,
         #     out_channels=1,
-        #     feature_size=36,
-        #     # use_checkpoint=True,
+        #     channels=[32, 32, 64],
+        #     attention_levels=[False, False, True],
+        #     num_head_channels=[0, 0, 64],
+        #     num_res_blocks=2,
+        #     # with_conditioning=True, 
+        #     # cross_attention_dim=4, # Condition with dist, elev, azim, fov;  straight/hidden view  # flatR | flatT
+        #     upcast_attention=True,
+        #     use_flash_attention=True,
+        #     use_combined_linear=True,
+        #     # dropout_cattn=0.5
         # )
-        # init_weights(self.unet3d_model, "zero")
+        self.unet3d_model = SwinUNETR(
+            img_size=(self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape),
+            in_channels=1,
+            out_channels=1,
+            feature_size=36,
+            # use_checkpoint=True,
+        )
+        
+        init_weights(self.unet3d_model, "zero")
 
         # self.perc25d_loss = None
         self.perc25d_loss = PerceptualLoss(
             spatial_dims=3, 
             network_type="radimagenet_resnet50", 
             is_fake_3d=True, 
-            fake_3d_ratio=8/256.
+            fake_3d_ratio=16/256.
         ).eval()
 
-        # self.perc30d_loss = None
-        self.perc30d_loss = PerceptualLoss(
-            spatial_dims=3, 
-            network_type="medicalnet_resnet50_23datasets", 
-            is_fake_3d=False, 
-            # fake_3d_ratio=10/256.
-        ).eval()
+        self.perc30d_loss = None
+        # self.perc30d_loss = PerceptualLoss(
+        #     spatial_dims=3, 
+        #     network_type="medicalnet_resnet50_23datasets", 
+        #     is_fake_3d=False, 
+        #     # fake_3d_ratio=10/256.
+        # ).eval()
 
         if model_cfg.phase=="finetune":
             pass
@@ -170,12 +194,13 @@ class SynLightningModule(LightningModule):
             T = camera_.T.unsqueeze_(-1)
         return torch.cat([R.reshape(-1, 1, 9), T.reshape(-1, 1, 3)], dim=-1).contiguous().view(-1, 1, 12)
 
-    def forward_volume(self, image2d, cameras, is_training=False):
+    def forward_volume(self, image2d, camfeat, cameras, is_training=False):
         image2d = torch.flip(image2d, dims=(-1,))
         _device = image2d.device
         B = image2d.shape[0]
        
-        out = self.unet2d_model.forward(image2d)
+        timesteps = 0*torch.randint(0, 1000, (B,), device=_device).long() 
+        out = self.unet2d_model.forward(image2d, timesteps, camfeat)
        
         # Resample the frustum out
         z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
@@ -199,9 +224,7 @@ class SynLightningModule(LightningModule):
             # vol = self.unet3d_model.forward(res) + res 
             # vol = vol / 2.0
             res = self.unet3d_model.forward(vol) + vol
-            return res
-        else:
-            return vol
+        return res
     
     def _common_step(self, batch, batch_idx, stage: Optional[str] = "evaluation"):
         image2d = batch["image2d"]
@@ -241,21 +264,27 @@ class SynLightningModule(LightningModule):
         figure_ct_source_hidden = self.forward_screen(image3d=image3d, cameras=view_hidden)
         figure_ct_source_random = self.forward_screen(image3d=image3d, cameras=view_random)
             
-        # Run the forward pass
-        figure_dx_source_concat = torch.cat([figure_xr_source_hidden, figure_ct_source_hidden, figure_ct_source_random])
-        camera_dx_render_concat = join_cameras_as_batch([view_hidden, view_hidden, view_random])
-        config_dx_render_concat = torch.cat([conf_hidden, conf_hidden, conf_random], dim=0)
+        # # Run the forward pass
+        # figure_dx_source_concat = torch.cat([figure_xr_source_hidden, figure_ct_source_hidden, figure_ct_source_random])
+        # camera_dx_render_concat = join_cameras_as_batch([view_hidden, view_hidden, view_random])
+        # config_dx_render_concat = torch.cat([conf_hidden, conf_hidden, conf_random], dim=0)
 
-        # For 3D
-        volume_dx_reproj_concat = self.forward_volume(
-            image2d=figure_dx_source_concat, 
-            cameras=camera_dx_render_concat,
-            is_training=(stage=="train")
-        )
-        volume_xr_reproj_hidden, \
-        volume_ct_reproj_hidden, \
-        volume_ct_reproj_random = torch.split(volume_dx_reproj_concat, B, dim=0)
+        # # For 3D
+        # volume_dx_reproj_concat = self.forward_volume(
+        #     image2d=figure_dx_source_concat, 
+        #     camfeat=config_dx_render_concat, 
+        #     cameras=camera_dx_render_concat,
+        #     is_training=(stage=="train")
+        # )
+        # volume_xr_reproj_hidden, \
+        # volume_ct_reproj_hidden, \
+        # volume_ct_reproj_random = torch.split(volume_dx_reproj_concat, B, dim=0)
 
+        with torch.no_grad():
+            volume_xr_reproj_hidden = self.forward_volume(image2d=figure_xr_source_hidden, camfeat=conf_hidden, cameras=view_hidden, is_training=(stage=="train"))
+            volume_ct_reproj_hidden = self.forward_volume(image2d=figure_ct_source_hidden, camfeat=conf_hidden, cameras=view_hidden, is_training=(stage=="train"))
+        volume_ct_reproj_random = self.forward_volume(image2d=figure_ct_source_random, camfeat=conf_random, cameras=view_random, is_training=(stage=="train"))
+           
         figure_xr_reproj_hidden_hidden = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_hidden)
         figure_xr_reproj_hidden_random = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_random)
         
@@ -265,24 +294,39 @@ class SynLightningModule(LightningModule):
         figure_ct_reproj_random_hidden = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_hidden)
         figure_ct_reproj_random_random = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_random)
         
-        im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.alpha \
-                      + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.gamma \
+        # im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.alpha \
+        #               + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.gamma \
 
-        im2d_loss_inv = F.l1_loss(figure_ct_reproj_hidden_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
-                      + F.l1_loss(figure_ct_reproj_hidden_random, figure_ct_source_random) * self.train_cfg.gamma \
-                      + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
+        # im2d_loss_inv = F.l1_loss(figure_ct_reproj_hidden_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
+        #               + F.l1_loss(figure_ct_reproj_hidden_random, figure_ct_source_random) * self.train_cfg.gamma \
+        #               + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
+        #               + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
+
+        # loss = im2d_loss_inv + im3d_loss_inv  
+        
+        # if self.perc25d_loss is not None:
+        #     perc25d_loss = self.perc25d_loss(volume_ct_reproj_hidden, image3d) \
+        #                  + self.perc25d_loss(volume_ct_reproj_random, image3d) 
+        #     loss += self.train_cfg.lamda * perc25d_loss
+
+        # if self.perc30d_loss is not None:
+        #     perc30d_loss = self.perc30d_loss(volume_ct_reproj_hidden, image3d) \
+        #                  + self.perc30d_loss(volume_ct_reproj_random, image3d) 
+        #     loss += self.train_cfg.lamda * perc30d_loss
+
+        im3d_loss_inv = F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.gamma \
+
+        im2d_loss_inv = F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
                       + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
-
+        
         loss = im2d_loss_inv + im3d_loss_inv  
         
         if self.perc25d_loss is not None:
-            perc25d_loss = self.perc25d_loss(volume_ct_reproj_hidden, image3d) \
-                         + self.perc25d_loss(volume_ct_reproj_random, image3d) 
+            perc25d_loss = self.perc25d_loss(volume_ct_reproj_random, image3d) 
             loss += self.train_cfg.lamda * perc25d_loss
 
         if self.perc30d_loss is not None:
-            perc30d_loss = self.perc30d_loss(volume_ct_reproj_hidden, image3d) \
-                         + self.perc30d_loss(volume_ct_reproj_random, image3d) 
+            perc30d_loss = self.perc30d_loss(volume_ct_reproj_random, image3d) 
             loss += self.train_cfg.lamda * perc30d_loss
 
         self.log(f"{stage}_loss", loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)

@@ -46,7 +46,7 @@ data:
   batch_size: 2
 
 model:  
-  phase: "diffusion"
+  phase: "swin"
   timesteps: 1000
   prediction_type: "sample" # "sample" or "epsilon" or "v_prediction"
   img_shape: ${data.img_shape}
@@ -82,7 +82,7 @@ resume_from_checkpoint: null
 trainer:
   accelerator: auto
   devices: -1
-  precision: '16-mixed'
+  precision: 32
   strategy: "ddp_find_unused_parameters_true"
   max_epochs: ${train.epochs}
   enable_model_summary: true
