@@ -52,7 +52,7 @@ model:
   img_shape: ${data.img_shape}
   vol_shape: ${data.vol_shape}
   batch_size: ${data.batch_size}
-  n_pts_per_ray: 400
+  n_pts_per_ray: 800
   fov_depth: 256
   min_depth: 7.0
   max_depth: 9.0
@@ -62,7 +62,7 @@ model:
 train:
   ckpt: ${resume_from_checkpoint}
   strict: 1 if ${resume_from_checkpoint} is not None else 0
-  lr: 4e-5
+  lr: 5e-5
   alpha: 1
   gamma: 10
   perceptual: false
@@ -76,8 +76,8 @@ test: null
 #   ckpt: ${resume_from_checkpoint}
 #   strict: 1 if ${resume_from_checkpoint} is not None else 0
 
-# resume_from_checkpoint: null
-resume_from_checkpoint: logs_2d/diffusion/version_0/checkpoints/epoch=237-validation_loss_epoch=1.92.ckpt
+resume_from_checkpoint: logs/swin/version_0/checkpoints/last.ckpt
+# resume_from_checkpoint: init.ckpt
 
 trainer:
   accelerator: auto

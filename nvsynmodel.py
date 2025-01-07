@@ -81,24 +81,39 @@ class SynLightningModule(LightningModule):
             ndc_extent=model_cfg.ndc_extent,
         )
 
-        self.unet2d_model = SwinUNETR(
+        self.unet2d_model = DiffusionModelUNet(
             spatial_dims=2,
-            img_size=self.model_cfg.img_shape, 
             in_channels=1,
-            out_channels=model_cfg.fov_depth,
-            feature_size=48,
-            depths=(2, 2, 2, 2),
-            num_heads=(3, 6, 12, 24),
-            norm_name="instance",
-            drop_rate=0.5,
-            attn_drop_rate=0.5,
-            dropout_path_rate=0.5,
-            normalize=True,
-            use_checkpoint=False,
-            downsample="mergingv2",
-            use_v2=True,
+            out_channels=model_cfg.vol_shape,
+            channels=[128, 128, 256],
+            attention_levels=[False, False, True],
+            num_head_channels=[0, 0, 256],
+            num_res_blocks=2,
+            with_conditioning=True, 
+            cross_attention_dim=4, # Condition with straight/hidden view  # flatR | flatT
+            upcast_attention=True,
+            use_flash_attention=True,
+            use_combined_linear=True,
+            dropout_cattn=0.5
         )
+        init_weights(self.unet2d_model, "normal")
+
         self.unet3d_model = None
+        # self.unet3d_model = DiffusionModelUNet(
+        #     spatial_dims=3,
+        #     in_channels=1,
+        #     out_channels=1,
+        #     channels=[128, 128, 256],
+        #     attention_levels=[False, False, True],
+        #     num_head_channels=[0, 0, 256],
+        #     num_res_blocks=2,
+        #     with_conditioning=True, 
+        #     cross_attention_dim=4, # Condition with straight/hidden view  # flatR | flatT
+        #     upcast_attention=True,
+        #     use_flash_attention=True,
+        #     use_combined_linear=True,
+        #     dropout_cattn=0.5
+        # )
         # self.unet3d_model = SwinUNETR(
         #     spatial_dims=3,
         #     img_size=self.model_cfg.vol_shape,
@@ -109,13 +124,13 @@ class SynLightningModule(LightningModule):
         # )
         # init_weights(self.unet3d_model, "zero")
 
-        # self.perc25d_loss = None
-        self.perc25d_loss = PerceptualLoss(
-            spatial_dims=3, 
-            network_type="radimagenet_resnet50", 
-            is_fake_3d=True, 
-            fake_3d_ratio=8/256.
-        ).eval()
+        self.perc25d_loss = None
+        # self.perc25d_loss = PerceptualLoss(
+        #     spatial_dims=3, 
+        #     network_type="radimagenet_resnet50", 
+        #     is_fake_3d=True, 
+        #     fake_3d_ratio=8/256.
+        # ).eval()
 
         # self.perc30d_loss = None
         self.perc30d_loss = PerceptualLoss(
@@ -179,38 +194,49 @@ class SynLightningModule(LightningModule):
             T = camera_.T.unsqueeze_(-1)
         return torch.cat([R.reshape(-1, 1, 9), T.reshape(-1, 1, 3)], dim=-1).contiguous().view(-1, 1, 12)
 
-    def forward_volume(self, image2d, cameras, is_training=False):
-        image2d = torch.flip(image2d, dims=(-1,))
+    def forward_volume(self, image2d, camfeat, cameras, is_training=False):
         _device = image2d.device
         B = image2d.shape[0]
-       
-        out = self.unet2d_model.forward(image2d)
-       
-        # Resample the frustum out
-        z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        y = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        x = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        grd = torch.stack(torch.meshgrid(x, y, z), dim=-1).view(-1, 3).unsqueeze(0).repeat(image2d.shape[0], 1, 1)  # 1 DHW 3 to B DHW 3
-        
-        # Process (resample) the volumes from ray views to ndc
-        pts = cameras.transform_points_ndc(grd)  # world to ndc, 1 DHW 3
-        vol = F.grid_sample(
-            out[:, :self.model_cfg.fov_depth,...].float().unsqueeze(1), 
-            pts.view(-1, self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape, 3).float(), 
-            mode="bilinear", 
-            padding_mode="zeros", 
-            align_corners=True,
-        ) 
 
-        vol = torch.permute(vol, [0, 1, 4, 3, 2])
-        vol = torch.flip(vol, dims=(-2,))
+        # image2d = torch.flip(image2d, dims=(-2,))
+        image2d = torch.rot90(image2d, 2, [2, 3])
+        timesteps = 0*torch.randint(0, 1000, (B,), device=_device).long() 
+        vol = self.unet2d_model.forward(image2d, timesteps, camfeat).unsqueeze_(1)
+
+        detcams = cameras.clone()
+        R = detcams.R
+        # T = detcams.T.unsqueeze_(-1)
+        T = torch.zeros_like(detcams.T.unsqueeze_(-1))
+        inv = torch.cat([torch.inverse(R), -T], dim=-1)
+        fwd = torch.cat([R, -T], dim=-1)
+
+        grd = F.affine_grid(inv, vol.size()).type(image2d.dtype)
+        out = F.grid_sample(vol, grd)
+
+        # # Resample the frustum out
+        # z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        # y = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        # x = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        # grd = torch.stack(torch.meshgrid(x, y, z), dim=-1).view(-1, 3).unsqueeze(0).repeat(image2d.shape[0], 1, 1)  # 1 DHW 3 to B DHW 3
+        
+        # # Process (resample) the volumes from ray views to ndc
+        # pts = cameras.transform_points_ndc(grd)  # world to ndc, 1 DHW 3
+        # vol = F.grid_sample(
+        #     out[:, :self.model_cfg.fov_depth,...].float().unsqueeze(1), 
+        #     pts.view(-1, self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape, 3).float(), 
+        #     mode="bilinear", 
+        #     padding_mode="zeros", 
+        #     align_corners=True,
+        # ) 
+
+        # out = torch.permute(out, [0, 1, 4, 3, 2])
+        # out = torch.flip(out, dims=(-2,))
+
         if self.unet3d_model is not None:
-            # vol = self.unet3d_model.forward(res) + res 
-            # vol = vol / 2.0
-            res = self.unet3d_model.forward(vol) + vol
-            return res
+            out = self.unet3d_model.forward(out, timesteps, camfeat) + out
+            return out
         else:
-            return vol
+            return out
     
     def _common_step(self, batch, batch_idx, stage: Optional[str] = "evaluation"):
         image2d = batch["image2d"]
@@ -258,6 +284,7 @@ class SynLightningModule(LightningModule):
         # For 3D
         volume_dx_reproj_concat = self.forward_volume(
             image2d=figure_dx_source_concat, 
+            camfeat=config_dx_render_concat, 
             cameras=camera_dx_render_concat,
             is_training=(stage=="train")
         )

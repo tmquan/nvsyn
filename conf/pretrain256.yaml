@@ -46,7 +46,7 @@ data:
   batch_size: 2
 
 model:  
-  phase: "swin"
+  phase: "unet"
   timesteps: 1000
   prediction_type: "sample" # "sample" or "epsilon" or "v_prediction"
   img_shape: ${data.img_shape}
