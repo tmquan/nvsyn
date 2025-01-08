@@ -84,7 +84,7 @@ class SynLightningModule(LightningModule):
         self.unet2d_model = DiffusionModelUNet(
             spatial_dims=2,
             in_channels=1,
-            out_channels=model_cfg.vol_shape,
+            out_channels=2*model_cfg.vol_shape+model_cfg.fov_depth,
             channels=[128, 128, 256],
             attention_levels=[False, False, True],
             num_head_channels=[0, 0, 256],
@@ -96,7 +96,7 @@ class SynLightningModule(LightningModule):
             use_combined_linear=True,
             dropout_cattn=0.5
         )
-        init_weights(self.unet2d_model, "normal")
+        # init_weights(self.unet2d_model, "normal")
 
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
@@ -132,13 +132,13 @@ class SynLightningModule(LightningModule):
         #     fake_3d_ratio=8/256.
         # ).eval()
 
-        # self.perc30d_loss = None
-        self.perc30d_loss = PerceptualLoss(
-            spatial_dims=3, 
-            network_type="medicalnet_resnet50_23datasets", 
-            is_fake_3d=False, 
-            # fake_3d_ratio=10/256.
-        ).eval()
+        self.perc30d_loss = None
+        # self.perc30d_loss = PerceptualLoss(
+        #     spatial_dims=3, 
+        #     network_type="medicalnet_resnet50_23datasets", 
+        #     is_fake_3d=False, 
+        #     # fake_3d_ratio=10/256.
+        # ).eval()
 
         if model_cfg.phase=="finetune":
             pass
@@ -154,8 +154,8 @@ class SynLightningModule(LightningModule):
         self.train_step_outputs = []
         self.validation_step_outputs = []
 
-        self.scheduler = DDPMScheduler(num_train_timesteps=model_cfg.timesteps)
-        self.inferer = DiffusionInferer(self.scheduler)
+        # self.scheduler = DDPMScheduler(num_train_timesteps=model_cfg.timesteps)
+        # self.inferer = DiffusionInferer(self.scheduler)
         self.psnr = PSNRMetric(max_val=1.0)
         self.ssim = SSIMMetric(spatial_dims=3, data_range=1.0)
         self.psnr_outputs = []
@@ -201,7 +201,7 @@ class SynLightningModule(LightningModule):
         # image2d = torch.flip(image2d, dims=(-2,))
         image2d = torch.rot90(image2d, 2, [2, 3])
         timesteps = 0*torch.randint(0, 1000, (B,), device=_device).long() 
-        vol = self.unet2d_model.forward(image2d, timesteps, camfeat).unsqueeze_(1)
+        vol = self.unet2d_model.forward(image2d, timesteps, camfeat)
 
         detcams = cameras.clone()
         R = detcams.R
@@ -210,25 +210,27 @@ class SynLightningModule(LightningModule):
         inv = torch.cat([torch.inverse(R), -T], dim=-1)
         fwd = torch.cat([R, -T], dim=-1)
 
-        grd = F.affine_grid(inv, vol.size()).type(image2d.dtype)
-        out = F.grid_sample(vol, grd)
-
-        # # Resample the frustum out
-        # z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # y = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # x = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # grd = torch.stack(torch.meshgrid(x, y, z), dim=-1).view(-1, 3).unsqueeze(0).repeat(image2d.shape[0], 1, 1)  # 1 DHW 3 to B DHW 3
+        org = vol[:, 0*self.model_cfg.vol_shape:1*self.model_cfg.vol_shape,...].view(-1,1,self.model_cfg.vol_shape,self.model_cfg.vol_shape,self.model_cfg.vol_shape)
+        grd = F.affine_grid(inv, org.size()).type(image2d.dtype)
+        rot = F.grid_sample(vol[:, 1*self.model_cfg.vol_shape:2*self.model_cfg.vol_shape,...].view(-1,1,self.model_cfg.vol_shape,self.model_cfg.vol_shape,self.model_cfg.vol_shape), grd)
         
-        # # Process (resample) the volumes from ray views to ndc
-        # pts = cameras.transform_points_ndc(grd)  # world to ndc, 1 DHW 3
-        # vol = F.grid_sample(
-        #     out[:, :self.model_cfg.fov_depth,...].float().unsqueeze(1), 
-        #     pts.view(-1, self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape, 3).float(), 
-        #     mode="bilinear", 
-        #     padding_mode="zeros", 
-        #     align_corners=True,
-        # ) 
+        # Resample the frustum out
+        z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        y = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        x = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
+        grd = torch.stack(torch.meshgrid(x, y, z), dim=-1).view(-1, 3).unsqueeze(0).repeat(image2d.shape[0], 1, 1)  # 1 DHW 3 to B DHW 3
+        
+        # Process (resample) the volumes from ray views to ndc
+        pts = cameras.transform_points_ndc(grd)  # world to ndc, 1 DHW 3
+        fov = F.grid_sample(
+            vol[:, -self.model_cfg.fov_depth:,...].float().view(-1,1,self.model_cfg.fov_depth,self.model_cfg.vol_shape,self.model_cfg.vol_shape), 
+            pts.view(-1, self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape, 3).float(), 
+            mode="bilinear", 
+            padding_mode="zeros", 
+            align_corners=True,
+        ) 
 
+        out = (rot + org + fov) / 3.0
         # out = torch.permute(out, [0, 1, 4, 3, 2])
         # out = torch.flip(out, dims=(-2,))
 
