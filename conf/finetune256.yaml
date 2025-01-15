@@ -21,9 +21,9 @@ data:
     - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4/"
     - "data/ChestXRLungSegmentation/MELA2022/raw/train/images/"
     - "data/ChestXRLungSegmentation/MELA2022/raw/val/images/"
-    - "data/ChestXRLungSegmentation/AMOS2022/raw/train/images/"
-    - "data/ChestXRLungSegmentation/AMOS2022/raw/val/images/"
     - "data/ChestXRLungSegmentation/MAISI/images/"
+    # - "data/ChestXRLungSegmentation/AMOS2022/raw/train/images/"
+    # - "data/ChestXRLungSegmentation/AMOS2022/raw/val/images/"
     # - "data/ChestXRLungSegmentation/TCIA/images/"
   train_label3d_folders: []
   train_image2d_folders:
@@ -46,14 +46,14 @@ data:
   batch_size: 1
 
 model:  
-  phase: "swin"
+  phase: "unet"
   timesteps: 1000
   prediction_type: "sample" # "sample" or "epsilon" or "v_prediction"
   img_shape: ${data.img_shape}
   vol_shape: ${data.vol_shape}
   batch_size: ${data.batch_size}
   n_pts_per_ray: 800
-  fov_depth: 256
+  fov_depth: 512
   min_depth: 7.0
   max_depth: 9.0
   ndc_extent: 1.0
@@ -76,13 +76,13 @@ test: null
 #   ckpt: ${resume_from_checkpoint}
 #   strict: 1 if ${resume_from_checkpoint} is not None else 0
 
-resume_from_checkpoint: logs/swin/version_0/checkpoints/last.ckpt
+resume_from_checkpoint: logs/unet/version_2/checkpoints/epoch=231-validation_loss_epoch=1.46.ckpt
 # resume_from_checkpoint: init.ckpt
 
 trainer:
   accelerator: auto
   devices: -1
-  precision: '16-mixed'
+  precision: 32
   strategy: "ddp_find_unused_parameters_true"
   max_epochs: ${train.epochs}
   enable_model_summary: true

@@ -46,7 +46,7 @@ data:
   batch_size: 2
 
 model:  
-  phase: "unet"
+  phase: "swin"
   timesteps: 1000
   prediction_type: "sample" # "sample" or "epsilon" or "v_prediction"
   img_shape: ${data.img_shape}
@@ -62,9 +62,10 @@ model:
 train:
   ckpt: ${resume_from_checkpoint}
   strict: 1 if ${resume_from_checkpoint} is not None else 0
-  lr: 5e-5
-  alpha: 1
-  gamma: 10
+  lr: 1e-4
+  alpha: 10
+  gamma: 1
+  delta: 0.01
   perceptual: false
   lamda: 0.1
   batch_size: ${data.batch_size}
@@ -103,8 +104,8 @@ callbacks:
     log_weight_decay: true
   - _target_: lightning.pytorch.callbacks.RichProgressBar
     refresh_rate: 1
-  - _target_: lightning.pytorch.callbacks.StochasticWeightAveraging
-    swa_lrs: 1e-3  
+  # - _target_: lightning.pytorch.callbacks.StochasticWeightAveraging
+  #   swa_lrs: 1e-3  
 
 logger:
   - _target_: lightning.pytorch.loggers.TensorBoardLogger

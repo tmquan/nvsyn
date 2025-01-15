@@ -15,11 +15,11 @@ from pytorch3d.renderer.cameras import (
 from pytorch3d.renderer.camera_utils import join_cameras_as_batch
 
 from monai.utils import optional_import
-from monai.networks.nets import UNet, VNet, UNETR, SwinUNETR, BasicUNet, ViTAutoEnc, AttentionUnet
+from monai.networks.nets import PatchDiscriminator, SwinUNETR
 from monai.inferers import DiffusionInferer
 from monai.networks.nets import DiffusionModelUNet
 from monai.networks.schedulers import DDPMScheduler
-
+from monai.losses.adversarial_loss import PatchAdversarialLoss
 from monai.networks.layers.factories import Norm
 from monai.losses.perceptual import PerceptualLoss
 from monai.metrics import PSNRMetric, SSIMMetric
@@ -80,21 +80,23 @@ class SynLightningModule(LightningModule):
             max_depth=model_cfg.max_depth,
             ndc_extent=model_cfg.ndc_extent,
         )
-
-        self.unet2d_model = DiffusionModelUNet(
+        
+        self.unet2d_model = SwinUNETR(
             spatial_dims=2,
             in_channels=1,
             out_channels=2*model_cfg.vol_shape+model_cfg.fov_depth,
-            channels=[128, 128, 256],
-            attention_levels=[False, False, True],
-            num_head_channels=[0, 0, 256],
-            num_res_blocks=2,
-            with_conditioning=True, 
-            cross_attention_dim=4, # Condition with straight/hidden view  # flatR | flatT
-            upcast_attention=True,
-            use_flash_attention=True,
-            use_combined_linear=True,
-            dropout_cattn=0.5
+            img_size=self.model_cfg.img_shape, 
+            feature_size=48,
+            depths=(2, 2, 2, 2),
+            num_heads=(3, 6, 12, 24),
+            norm_name="instance",
+            drop_rate=0.5,
+            attn_drop_rate=0.5,
+            dropout_path_rate=0.5,
+            normalize=True,
+            use_checkpoint=False,
+            downsample="mergingv2",
+            use_v2=True,
         )
         # init_weights(self.unet2d_model, "normal")
 
@@ -124,6 +126,16 @@ class SynLightningModule(LightningModule):
         # )
         # init_weights(self.unet3d_model, "zero")
 
+        # self.p_disc_model = None
+        self.p_disc_model = PatchDiscriminator(
+            spatial_dims=3, 
+            num_layers_d=3, 
+            channels=64, 
+            in_channels=1, 
+            out_channels=1
+        )
+        self.adv_loss = PatchAdversarialLoss(criterion="least_squares")
+
         self.perc25d_loss = None
         # self.perc25d_loss = PerceptualLoss(
         #     spatial_dims=3, 
@@ -132,13 +144,13 @@ class SynLightningModule(LightningModule):
         #     fake_3d_ratio=8/256.
         # ).eval()
 
-        self.perc30d_loss = None
-        # self.perc30d_loss = PerceptualLoss(
-        #     spatial_dims=3, 
-        #     network_type="medicalnet_resnet50_23datasets", 
-        #     is_fake_3d=False, 
-        #     # fake_3d_ratio=10/256.
-        # ).eval()
+        # self.perc30d_loss = None
+        self.perc30d_loss = PerceptualLoss(
+            spatial_dims=3, 
+            network_type="medicalnet_resnet50_23datasets", 
+            is_fake_3d=False, 
+            # fake_3d_ratio=10/256.
+        ).eval()
 
         if model_cfg.phase=="finetune":
             pass
@@ -160,6 +172,8 @@ class SynLightningModule(LightningModule):
         self.ssim = SSIMMetric(spatial_dims=3, data_range=1.0)
         self.psnr_outputs = []
         self.ssim_outputs = []
+        # Important: This property activates manual optimization.
+        self.automatic_optimization = False
 
     def correct_window(self,
         T_old, 
@@ -200,8 +214,8 @@ class SynLightningModule(LightningModule):
 
         # image2d = torch.flip(image2d, dims=(-2,))
         image2d = torch.rot90(image2d, 2, [2, 3])
-        timesteps = 0*torch.randint(0, 1000, (B,), device=_device).long() 
-        vol = self.unet2d_model.forward(image2d, timesteps, camfeat)
+        # timesteps = 0*torch.randint(0, 1000, (B,), device=_device).long() 
+        vol = self.unet2d_model.forward(image2d)
 
         detcams = cameras.clone()
         R = detcams.R
@@ -230,17 +244,22 @@ class SynLightningModule(LightningModule):
             align_corners=True,
         ) 
 
-        out = (rot + org + fov) / 3.0
+        out = (rot + org + 2*fov) / 4.0
         # out = torch.permute(out, [0, 1, 4, 3, 2])
         # out = torch.flip(out, dims=(-2,))
 
         if self.unet3d_model is not None:
-            out = self.unet3d_model.forward(out, timesteps, camfeat) + out
+            # out = self.unet3d_model.forward(out, timesteps, camfeat) + out
+            out = self.unet3d_model.forward(out) + out
             return out
         else:
             return out
     
     def _common_step(self, batch, batch_idx, stage: Optional[str] = "evaluation"):
+        # Implementation follows the PyTorch tutorial:
+        # https://pytorch.org/tutorials/beginner/dcgan_faces_tutorial.html
+        g_optim, d_optim = self.optimizers()
+
         image2d = batch["image2d"]
         image3d = batch["image3d"]
         _device = batch["image3d"].device
@@ -311,20 +330,20 @@ class SynLightningModule(LightningModule):
                       + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
                       + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
 
-        loss = im2d_loss_inv + im3d_loss_inv  
+        r_loss = im2d_loss_inv + im3d_loss_inv  
         
         if self.perc25d_loss is not None:
             perc25d_loss = self.perc25d_loss(volume_ct_reproj_hidden, image3d) \
                          + self.perc25d_loss(volume_ct_reproj_random, image3d) 
-            loss += self.train_cfg.lamda * perc25d_loss
+            r_loss += self.train_cfg.lamda * perc25d_loss
 
         if self.perc30d_loss is not None:
             perc30d_loss = self.perc30d_loss(volume_ct_reproj_hidden, image3d) \
                          + self.perc30d_loss(volume_ct_reproj_random, image3d) 
-            loss += self.train_cfg.lamda * perc30d_loss
+            r_loss += self.train_cfg.lamda * perc30d_loss
 
-        self.log(f"{stage}_loss", loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
-        loss = torch.nan_to_num(loss, nan=1.0) 
+        # self.log(f"{stage}_loss", loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
+        # loss = torch.nan_to_num(loss, nan=1.0) 
         
         # Visualization step
         if batch_idx == 0:
@@ -362,7 +381,33 @@ class SynLightningModule(LightningModule):
                 tensorboard = self.logger.experiment
                 grid2d = torchvision.utils.make_grid(viz2d, normalize=False, scale_each=False, nrow=1, padding=0).clamp(0, 1)
                 tensorboard.add_image(f"{stage}_df_samples", grid2d, self.current_epoch * B + batch_idx)    
-                
+
+        if stage=="train":
+            # Generator
+            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_hidden]).contiguous().float())[-1] 
+            g_fake_loss = self.adv_loss(fake_logits, target_is_real=True, for_discriminator=False)
+            g_loss = self.train_cfg.delta * g_fake_loss + r_loss
+            self.log(f"{stage}_g_fake_loss", g_fake_loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
+            g_optim.zero_grad()
+            self.manual_backward(g_loss)
+            g_optim.step()
+
+            # Discriminator
+            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_hidden]).contiguous().detach())[-1] 
+            real_logits = self.p_disc_model.forward(torch.cat([image3d, image3d]).contiguous().detach())[-1] 
+            d_fake_loss = self.adv_loss(fake_logits, target_is_real=False, for_discriminator=True)
+            d_real_loss = self.adv_loss(real_logits, target_is_real=True, for_discriminator=True)
+            d_loss = self.train_cfg.delta * (d_real_loss + d_fake_loss) / 2
+            self.log(f"{stage}_d_fake_loss", d_fake_loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
+            self.log(f"{stage}_d_real_loss", d_real_loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
+            
+            d_optim.zero_grad()
+            self.manual_backward(d_loss)
+            d_optim.step()
+            loss = r_loss
+        else:
+            loss = r_loss       
+        self.log(f"{stage}_loss", loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B) 
         return loss
                         
     def training_step(self, batch, batch_idx):
@@ -429,12 +474,25 @@ class SynLightningModule(LightningModule):
         self.ssim_outputs.clear()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.train_cfg.lr, betas=(0.5, 0.999)
+        optimizer_g = torch.optim.AdamW(
+            [
+                {'params': self.unet2d_model.parameters()},
+            ], lr=1*self.train_cfg.lr, betas=(0.5, 0.999)
         )
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, #
+
+        optimizer_d = torch.optim.AdamW(
+            [
+                {'params': self.p_disc_model.parameters()},
+            ], lr=5*self.train_cfg.lr, betas=(0.5, 0.999)
+        )
+        scheduler_g = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer_g, #
             milestones=[100, 200, 300, 400], 
             gamma=0.5
         )
-        return [optimizer], [scheduler]
+        scheduler_d = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer_d, #
+            milestones=[100, 200, 300, 400], 
+            gamma=0.5
+        )
+        return [optimizer_g, optimizer_d], [scheduler_g, scheduler_d]
