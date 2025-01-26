@@ -102,9 +102,9 @@ class SynLightningModule(LightningModule):
             spatial_dims=2,
             in_channels=1,
             out_channels=model_cfg.fov_depth + 2*model_cfg.vol_shape,
-            channels=[128, 256, 256],
-            attention_levels=[False, True, True],
-            num_head_channels=[0, 256, 256],
+            channels=[128, 256, 256, 256],
+            attention_levels=[False, True, True, True],
+            num_head_channels=[128, 256, 256, 256],
             num_res_blocks=2,
             with_conditioning=True, 
             cross_attention_dim=4, # Condition with straight/hidden view  # flatR | flatT
@@ -113,7 +113,7 @@ class SynLightningModule(LightningModule):
             use_combined_linear=True,
             dropout_cattn=0.5
         )
-        init_weights(self.unet2d_model, "normal")
+        # init_weights(self.unet2d_model, "normal")
 
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
@@ -249,7 +249,7 @@ class SynLightningModule(LightningModule):
         # T = detcams.T.unsqueeze_(-1)
         T = torch.zeros_like(detcams.T.unsqueeze_(-1))
         inv = torch.cat([torch.inverse(R), -T], dim=-1)
-        fwd = torch.cat([R, -T], dim=-1)
+        # fwd = torch.cat([R, -T], dim=-1)
 
         org = vol[:, -2*self.model_cfg.vol_shape:-1*self.model_cfg.vol_shape,...].view(-1,1,self.model_cfg.vol_shape,self.model_cfg.vol_shape,self.model_cfg.vol_shape)
         grd = F.affine_grid(inv, org.size()).type(image2d.dtype)
@@ -272,25 +272,6 @@ class SynLightningModule(LightningModule):
         ) 
 
         out = (rot + org + 2*fov) / 4.0
-        # out = torch.permute(out, [0, 1, 4, 3, 2])
-        # out = torch.flip(out, dims=(-2,))
-
-        # # # Resample the frustum out
-        # z = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # y = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # x = torch.linspace(-1.0, 1.0, steps=self.model_cfg.vol_shape, device=_device)
-        # grd = torch.stack(torch.meshgrid(x, y, z), dim=-1).view(-1, 3).unsqueeze(0).repeat(image2d.shape[0], 1, 1)  # 1 DHW 3 to B DHW 3
-        
-        # # Process (resample) the volumes from ray views to ndc
-        # pts = cameras.transform_points_ndc(grd)  # world to ndc, 1 DHW 3
-        # fov = F.grid_sample(
-        #     out[:, :self.model_cfg.fov_depth,...].float().view(-1,1,self.model_cfg.fov_depth,self.model_cfg.vol_shape,self.model_cfg.vol_shape), 
-        #     pts.view(-1, self.model_cfg.vol_shape, self.model_cfg.vol_shape, self.model_cfg.vol_shape, 3).float(), 
-        #     mode="bilinear", 
-        #     padding_mode="zeros", 
-        #     align_corners=True,
-        # ) 
-        # out = fov 
 
         out = torch.permute(out, [0, 1, 4, 3, 2])
         out = torch.flip(out, dims=(-2,))
@@ -369,11 +350,11 @@ class SynLightningModule(LightningModule):
         figure_ct_reproj_random_random = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_random)
         
         im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.alpha \
-                      + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.gamma \
+                      + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.alpha \
 
         im2d_loss_inv = F.l1_loss(figure_ct_reproj_hidden_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
-                      + F.l1_loss(figure_ct_reproj_hidden_random, figure_ct_source_random) * self.train_cfg.gamma \
-                      + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
+                      + F.l1_loss(figure_ct_reproj_hidden_random, figure_ct_source_random) * self.train_cfg.alpha \
+                      + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
                       + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
 
         r_loss = im2d_loss_inv + im3d_loss_inv  
