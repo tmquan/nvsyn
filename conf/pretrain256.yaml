@@ -65,7 +65,7 @@ train:
   lr: 1e-4
   alpha: 10
   gamma: 1
-  delta: 0.01
+  delta: 0.1
   perceptual: false
   lamda: 0.1
   batch_size: ${data.batch_size}

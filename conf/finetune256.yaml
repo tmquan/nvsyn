@@ -43,7 +43,7 @@ data:
   test_label2d_folders: []
   img_shape: 256
   vol_shape: 256
-  batch_size: 1
+  batch_size: 2
 
 model:  
   phase: "unet"
@@ -53,7 +53,7 @@ model:
   vol_shape: ${data.vol_shape}
   batch_size: ${data.batch_size}
   n_pts_per_ray: 800
-  fov_depth: 512
+  fov_depth: 400
   min_depth: 7.0
   max_depth: 9.0
   ndc_extent: 1.0
@@ -62,9 +62,10 @@ model:
 train:
   ckpt: ${resume_from_checkpoint}
   strict: 1 if ${resume_from_checkpoint} is not None else 0
-  lr: 5e-5
-  alpha: 1
-  gamma: 10
+  lr: 1e-4
+  alpha: 10
+  gamma: 1
+  delta: 0.1
   perceptual: false
   lamda: 0.1
   batch_size: ${data.batch_size}
@@ -76,7 +77,7 @@ test: null
 #   ckpt: ${resume_from_checkpoint}
 #   strict: 1 if ${resume_from_checkpoint} is not None else 0
 
-resume_from_checkpoint: logs/unet/version_2/checkpoints/epoch=231-validation_loss_epoch=1.46.ckpt
+resume_from_checkpoint: null
 # resume_from_checkpoint: init.ckpt
 
 trainer:
@@ -103,8 +104,8 @@ callbacks:
     log_weight_decay: true
   - _target_: lightning.pytorch.callbacks.RichProgressBar
     refresh_rate: 1
-  - _target_: lightning.pytorch.callbacks.StochasticWeightAveraging
-    swa_lrs: 1e-3  
+  # - _target_: lightning.pytorch.callbacks.StochasticWeightAveraging
+  #   swa_lrs: 1e-3  
 
 logger:
   - _target_: lightning.pytorch.loggers.TensorBoardLogger

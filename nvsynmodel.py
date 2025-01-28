@@ -98,6 +98,7 @@ class SynLightningModule(LightningModule):
         #     downsample="mergingv2",
         #     use_v2=True,
         # )
+        
         self.unet2d_model = DiffusionModelUNet(
             spatial_dims=2,
             in_channels=1,
@@ -113,7 +114,7 @@ class SynLightningModule(LightningModule):
             use_combined_linear=True,
             dropout_cattn=0.5
         )
-        # init_weights(self.unet2d_model, "normal")
+        init_weights(self.unet2d_model, "normal")
 
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
@@ -147,7 +148,8 @@ class SynLightningModule(LightningModule):
             num_layers_d=4, 
             channels=64, 
             in_channels=1, 
-            out_channels=1
+            out_channels=1,
+            dropout=0.5
         )
         init_weights(self.p_disc_model, init_type="normal", init_gain=0.1)
         self.adv_loss = PatchAdversarialLoss(criterion="least_squares")
@@ -349,13 +351,14 @@ class SynLightningModule(LightningModule):
         figure_ct_reproj_random_hidden = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_hidden)
         figure_ct_reproj_random_random = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_random)
         
-        im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.alpha \
+        im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.gamma \
                       + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.alpha \
 
-        im2d_loss_inv = F.l1_loss(figure_ct_reproj_hidden_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
+        im2d_loss_inv = F.l1_loss(figure_ct_reproj_hidden_hidden, figure_ct_source_hidden) * self.train_cfg.gamma \
                       + F.l1_loss(figure_ct_reproj_hidden_random, figure_ct_source_random) * self.train_cfg.alpha \
                       + F.l1_loss(figure_ct_reproj_random_hidden, figure_ct_source_hidden) * self.train_cfg.alpha \
-                      + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.alpha \
+                      + F.l1_loss(figure_ct_reproj_random_random, figure_ct_source_random) * self.train_cfg.gamma \
+                      + F.l1_loss(figure_xr_reproj_hidden_hidden, figure_xr_source_hidden) * self.train_cfg.gamma \
 
         r_loss = im2d_loss_inv + im3d_loss_inv  
         
@@ -411,7 +414,7 @@ class SynLightningModule(LightningModule):
 
         if stage=="train":
             # Generator
-            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_hidden]).contiguous().float())[-1] 
+            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_random]).contiguous().float())[-1] 
             g_fake_loss = self.adv_loss(fake_logits, target_is_real=True, for_discriminator=False)
             g_loss = self.train_cfg.delta * g_fake_loss + r_loss
             self.log(f"{stage}_g_fake_loss", g_fake_loss, on_step=(stage == "train"), prog_bar=True, logger=True, sync_dist=True, batch_size=B)
@@ -420,7 +423,7 @@ class SynLightningModule(LightningModule):
             g_optim.step()
 
             # Discriminator
-            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_hidden]).contiguous().detach())[-1] 
+            fake_logits = self.p_disc_model.forward(torch.cat([volume_ct_reproj_hidden, volume_ct_reproj_random]).contiguous().detach())[-1] 
             real_logits = self.p_disc_model.forward(torch.cat([image3d, image3d]).contiguous().detach())[-1] 
             d_fake_loss = self.adv_loss(fake_logits, target_is_real=False, for_discriminator=True)
             d_real_loss = self.adv_loss(real_logits, target_is_real=True, for_discriminator=True)
