@@ -64,7 +64,7 @@ train:
   strict: 1 if ${resume_from_checkpoint} is not None else 0
   lr: 1e-4
   alpha: 10
-  gamma: 1
+  gamma: 10
   delta: 0.1
   perceptual: false
   lamda: 0.1
