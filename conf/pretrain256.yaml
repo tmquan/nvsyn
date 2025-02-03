@@ -21,7 +21,7 @@ data:
     - "data/ChestXRLungSegmentation/MOSMED/processed/train/images/CT-4/"
     - "data/ChestXRLungSegmentation/MELA2022/raw/train/images/"
     - "data/ChestXRLungSegmentation/MELA2022/raw/val/images/"
-    - "data/ChestXRLungSegmentation/MAISI/images/"
+    # - "data/ChestXRLungSegmentation/MAISI/images/"
     # - "data/ChestXRLungSegmentation/AMOS2022/raw/train/images/"
     # - "data/ChestXRLungSegmentation/AMOS2022/raw/val/images/"
     # - "data/ChestXRLungSegmentation/TCIA/images/"

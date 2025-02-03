@@ -7,6 +7,8 @@ import torch.nn.functional as F
 import torchvision
 import diffusers
 
+from kornia.enhance import equalize
+
 from pytorch3d.renderer.cameras import (
     FoVPerspectiveCameras,
     FoVOrthographicCameras,
@@ -15,7 +17,7 @@ from pytorch3d.renderer.cameras import (
 from pytorch3d.renderer.camera_utils import join_cameras_as_batch
 
 from monai.utils import optional_import
-from monai.networks.nets import PatchDiscriminator, SwinUNETR
+from monai.networks.nets import PatchDiscriminator, DenseNet121
 from monai.inferers import DiffusionInferer
 from monai.networks.nets import DiffusionModelUNet
 from monai.networks.schedulers import DDPMScheduler
@@ -116,6 +118,14 @@ class SynLightningModule(LightningModule):
         )
         init_weights(self.unet2d_model, "normal")
 
+        # self.tffunc_model = None
+        self.tffunc_model = DenseNet121(
+            spatial_dims=2, 
+            in_channels=1, 
+            out_channels=4096
+        )
+        init_weights(self.tffunc_model, "normal")
+
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
         #     spatial_dims=3,
@@ -212,9 +222,19 @@ class SynLightningModule(LightningModule):
         T_new = (T_raw - b_min) / range_new 
         return T_new.clamp(0, 1)
     
-    def forward_screen(self, image3d, cameras, learnable_windowing=False):
-        image3d = self.correct_window(image3d, a_min=-1024, a_max=3071, b_min=-512, b_max=3071)
-        image2d = self.fwd_renderer(image3d, cameras)
+    def forward_screen(self, image3d, cameras, tffunc=None):
+        if tffunc is not None:
+            shape3d = image3d.shape
+            colored = torch.empty_like(torch.flatten(image3d, start_dim=1))
+            image3d = self.correct_window(image3d, a_min=-1024, a_max=3071, b_min=0, b_max=4095)
+            for B in range(shape3d[0]):
+                colored[B] = tffunc[B][torch.flatten(4095*torch.Tensor(image3d[B])).long()]
+            image3d = colored.reshape(shape3d)
+            image2d = self.fwd_renderer(image3d, cameras)
+        else:
+            image3d = self.correct_window(image3d, a_min=-1024, a_max=3071, b_min=-512, b_max=3071)
+            image2d = self.fwd_renderer(image3d, cameras)
+            # image2d = equalize(image2d)
         return image2d
     
     def flatten_cameras(self, cameras, zero_translation=False):
@@ -343,15 +363,23 @@ class SynLightningModule(LightningModule):
         volume_xr_reproj_hidden, \
         volume_ct_reproj_hidden, \
         volume_ct_reproj_random = torch.split(volume_dx_reproj_concat, B, dim=0)
+        
+        bundle_tf = self.tffunc_model(
+            torch.cat([figure_xr_source_hidden, figure_ct_source_hidden, figure_ct_source_random])
+        )
 
-        figure_xr_reproj_hidden_hidden = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_hidden)
-        figure_xr_reproj_hidden_random = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_random)
+        bundle_xr_reproj_hidden, \
+        bundle_ct_reproj_hidden, \
+        bundle_ct_reproj_random = torch.split(bundle_tf, B, dim=0)
+
+        figure_xr_reproj_hidden_hidden = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_hidden, tffunc=bundle_xr_reproj_hidden)
+        figure_xr_reproj_hidden_random = self.forward_screen(image3d=volume_xr_reproj_hidden[:,[0],...], cameras=view_random, tffunc=bundle_xr_reproj_hidden)
         
-        figure_ct_reproj_hidden_hidden = self.forward_screen(image3d=volume_ct_reproj_hidden[:,[0],...], cameras=view_hidden)
-        figure_ct_reproj_hidden_random = self.forward_screen(image3d=volume_ct_reproj_hidden[:,[0],...], cameras=view_random)
+        figure_ct_reproj_hidden_hidden = self.forward_screen(image3d=volume_ct_reproj_hidden[:,[0],...], cameras=view_hidden, tffunc=bundle_ct_reproj_hidden)
+        figure_ct_reproj_hidden_random = self.forward_screen(image3d=volume_ct_reproj_hidden[:,[0],...], cameras=view_random, tffunc=bundle_ct_reproj_hidden)
         
-        figure_ct_reproj_random_hidden = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_hidden)
-        figure_ct_reproj_random_random = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_random)
+        figure_ct_reproj_random_hidden = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_hidden, tffunc=bundle_ct_reproj_random)
+        figure_ct_reproj_random_random = self.forward_screen(image3d=volume_ct_reproj_random[:,[0],...], cameras=view_random, tffunc=bundle_ct_reproj_random)
         
         im3d_loss_inv = F.l1_loss(volume_ct_reproj_hidden, image3d) * self.train_cfg.gamma \
                       + F.l1_loss(volume_ct_reproj_random, image3d) * self.train_cfg.alpha \
@@ -509,6 +537,7 @@ class SynLightningModule(LightningModule):
         optimizer_g = torch.optim.AdamW(
             [
                 {'params': self.unet2d_model.parameters()},
+                {'params': self.tffunc_model.parameters()},
             ], lr=1*self.train_cfg.lr, betas=(0.5, 0.999)
         )
 
