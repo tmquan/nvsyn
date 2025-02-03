@@ -17,7 +17,7 @@ from pytorch3d.renderer.cameras import (
 from pytorch3d.renderer.camera_utils import join_cameras_as_batch
 
 from monai.utils import optional_import
-from monai.networks.nets import PatchDiscriminator, DenseNet121
+from monai.networks.nets import PatchDiscriminator, ViT
 from monai.inferers import DiffusionInferer
 from monai.networks.nets import DiffusionModelUNet
 from monai.networks.schedulers import DDPMScheduler
@@ -119,13 +119,25 @@ class SynLightningModule(LightningModule):
         init_weights(self.unet2d_model, "normal")
 
         # self.tffunc_model = None
-        self.tffunc_model = DenseNet121(
+        # self.tffunc_model = DenseNet121(
+        #     spatial_dims=2, 
+        #     in_channels=1, 
+        #     out_channels=4096
+        # )
+        # init_weights(self.tffunc_model, "normal")
+        self.tffunc_model = ViT(
             spatial_dims=2, 
             in_channels=1, 
-            out_channels=4096
+            img_size=model_cfg.img_shape, 
+            patch_size=16, 
+            classification=True,
+            hidden_size=384,
+            mlp_dim=1024,
+            num_layers=12,
+            num_heads=12,
+            num_classes=4096
         )
-        init_weights(self.tffunc_model, "normal")
-
+        
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
         #     spatial_dims=3,
@@ -366,7 +378,7 @@ class SynLightningModule(LightningModule):
         
         bundle_tf = self.tffunc_model(
             torch.cat([figure_xr_source_hidden, figure_ct_source_hidden, figure_ct_source_random])
-        )
+        )[0]
 
         bundle_xr_reproj_hidden, \
         bundle_ct_reproj_hidden, \
