@@ -131,12 +131,29 @@ class SynLightningModule(LightningModule):
             img_size=model_cfg.img_shape, 
             patch_size=16, 
             classification=True,
-            hidden_size=384,
+            hidden_size=512,
             mlp_dim=1024,
-            num_layers=12,
-            num_heads=12,
+            num_layers=8,
+            num_heads=8,
+            dropout_rate=0.5,
             num_classes=4096
         )
+        with torch.no_grad():
+            # Handle Sequential vs Linear cases
+            if isinstance(self.tffunc_model.classification_head, nn.Sequential):
+                linear_layer = self.tffunc_model.classification_head[0]  # Access first Linear layer
+            else:
+                linear_layer = self.tffunc_model.classification_head
+
+            # Set weights to zero
+            nn.init.zeros_(linear_layer.weight)
+            
+            # Set bias to linear range from 0 to 1
+            num_classes = linear_layer.bias.shape[0]
+     
+            # Create linear bias values [0, 1] with num_classes steps
+            bias_values = torch.linspace(0, 1, num_classes)
+            linear_layer.bias.copy_(bias_values)
         
         self.unet3d_model = None
         # self.unet3d_model = DiffusionModelUNet(
